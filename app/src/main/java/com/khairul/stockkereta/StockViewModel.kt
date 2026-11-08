@@ -12,11 +12,40 @@ class StockViewModel : ViewModel() {
     private val _cars = MutableStateFlow<List<Car>>(emptyList())
     val cars: StateFlow<List<Car>> = _cars
 
+    private var signInInProgress = false
+    private val pendingAuthCallbacks = mutableListOf<(String?) -> Unit>()
+
     init {
-        if (auth.currentUser == null) auth.signInAnonymously()
-            .addOnSuccessListener { listenCars() }
-            .addOnFailureListener { _cars.value = emptyList() }
-        else listenCars()
+        ensureAuthenticated()
+    }
+
+    private fun ensureAuthenticated(onReady: (String?) -> Unit = {}) {
+        val existingUser = auth.currentUser
+        if (existingUser != null) {
+            listenCars()
+            onReady(null)
+            return
+        }
+
+        pendingAuthCallbacks.add(onReady)
+        if (signInInProgress) return
+
+        signInInProgress = true
+        auth.signInAnonymously()
+            .addOnSuccessListener {
+                signInInProgress = false
+                listenCars()
+                val callbacks = pendingAuthCallbacks.toList()
+                pendingAuthCallbacks.clear()
+                callbacks.forEach { it(null) }
+            }
+            .addOnFailureListener { error ->
+                signInInProgress = false
+                val callbacks = pendingAuthCallbacks.toList()
+                pendingAuthCallbacks.clear()
+                val message = error.localizedMessage ?: "Gagal mengesahkan akaun Firebase"
+                callbacks.forEach { it(message) }
+            }
     }
 
     private fun listenCars() {
@@ -31,21 +60,39 @@ class StockViewModel : ViewModel() {
     }
 
     fun addCar(car: Car, onDone: (String?) -> Unit = {}) {
-        val uid = auth.currentUser?.uid
-        if (uid == null) { onDone("Akaun belum disahkan"); return }
-        db.collection("users").document(uid).collection("cars")
-            .add(car.copy(id = ""))
-            .addOnSuccessListener { onDone(null) }
-            .addOnFailureListener { onDone(it.localizedMessage) }
+        ensureAuthenticated { authError ->
+            if (authError != null) {
+                onDone(authError)
+                return@ensureAuthenticated
+            }
+            val uid = auth.currentUser?.uid
+            if (uid == null) {
+                onDone("Firebase belum mengesahkan akaun. Cuba sekali lagi.")
+                return@ensureAuthenticated
+            }
+            db.collection("users").document(uid).collection("cars")
+                .add(car.copy(id = ""))
+                .addOnSuccessListener { onDone(null) }
+                .addOnFailureListener { onDone(it.localizedMessage ?: "Gagal menyimpan rekod") }
+        }
     }
 
     fun sellCar(id: String, price: Double, onDone: (String?) -> Unit = {}) {
-        val uid = auth.currentUser?.uid
-        if (uid == null) { onDone("Akaun belum disahkan"); return }
-        db.collection("users").document(uid).collection("cars").document(id)
-            .update(mapOf("salePrice" to price, "status" to "TERJUAL"))
-            .addOnSuccessListener { onDone(null) }
-            .addOnFailureListener { onDone(it.localizedMessage) }
+        ensureAuthenticated { authError ->
+            if (authError != null) {
+                onDone(authError)
+                return@ensureAuthenticated
+            }
+            val uid = auth.currentUser?.uid
+            if (uid == null) {
+                onDone("Firebase belum mengesahkan akaun. Cuba sekali lagi.")
+                return@ensureAuthenticated
+            }
+            db.collection("users").document(uid).collection("cars").document(id)
+                .update(mapOf("salePrice" to price, "status" to "TERJUAL"))
+                .addOnSuccessListener { onDone(null) }
+                .addOnFailureListener { onDone(it.localizedMessage ?: "Gagal mengemas kini jualan") }
+        }
     }
 
     fun deleteCar(id: String) {
